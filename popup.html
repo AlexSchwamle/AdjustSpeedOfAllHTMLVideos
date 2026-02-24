@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 270px;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    background: #1a1a1e;
+    color: #e0e0e4;
+    padding: 16px;
+  }
+  h1 {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: #ffffffcc;
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  h1 img { width: 18px; height: 18px; }
+  .field {
+    margin-bottom: 12px;
+  }
+  label {
+    display: block;
+    font-size: 11px;
+    font-weight: 500;
+    color: #999;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 5px;
+  }
+  .input-row {
+    display: flex;
+    align-items: center;
+    background: #27272b;
+    border: 1px solid #3a3a40;
+    border-radius: 6px;
+    overflow: hidden;
+    transition: border-color 0.15s;
+  }
+  .input-row:focus-within {
+    border-color: #6e6eff;
+  }
+  .input-row input[type="number"] {
+    flex: 1;
+    background: none;
+    border: none;
+    color: #e0e0e4;
+    font-family: "SF Mono", Consolas, Menlo, monospace;
+    font-size: 14px;
+    padding: 7px 10px;
+    outline: none;
+    width: 0;
+    -moz-appearance: textfield;
+  }
+  .input-row input[type="number"]::-webkit-inner-spin-button,
+  .input-row input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+  }
+  .spin-btns {
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid #3a3a40;
+  }
+  .spin-btns button {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 10px;
+    padding: 2px 8px;
+    cursor: pointer;
+    line-height: 1;
+    transition: background 0.1s, color 0.1s;
+  }
+  .spin-btns button:hover {
+    background: #3a3a44;
+    color: #ccc;
+  }
+  .spin-btns button:first-child {
+    border-bottom: 1px solid #3a3a40;
+  }
+  .suffix {
+    font-size: 12px;
+    color: #666;
+    padding-right: 4px;
+    font-family: "SF Mono", Consolas, monospace;
+  }
+
+  /* Hotkey fields */
+  .hotkey-row {
+    display: flex;
+    gap: 8px;
+  }
+  .hotkey-row .field { flex: 1; margin-bottom: 12px; }
+  .hotkey-input {
+    width: 100%;
+    background: #27272b;
+    border: 1px solid #3a3a40;
+    border-radius: 6px;
+    color: #e0e0e4;
+    font-family: "SF Mono", Consolas, Menlo, monospace;
+    font-size: 14px;
+    padding: 7px 10px;
+    outline: none;
+    text-align: center;
+    transition: border-color 0.15s;
+  }
+  .hotkey-input:focus {
+    border-color: #6e6eff;
+  }
+
+  .saved-msg {
+    text-align: center;
+    font-size: 11px;
+    color: #6e6eff;
+    opacity: 0;
+    transition: opacity 0.25s;
+    margin-top: 2px;
+  }
+  .saved-msg.show { opacity: 1; }
+
+  .hint {
+    font-size: 10px;
+    color: #666;
+    margin-top: 2px;
+  }
+</style>
+</head>
+<body>
+  <h1><img src="icons/icon48.png" alt="">Video Speed Ctrl</h1>
+
+  <div class="field">
+    <label>Speed Step (± delta)</label>
+    <div class="input-row">
+      <input type="number" id="delta" min="0.01" max="5" step="0.01" value="0.05">
+      <span class="suffix">×</span>
+      <div class="spin-btns">
+        <button data-target="delta" data-dir="1">&#9650;</button>
+        <button data-target="delta" data-dir="-1">&#9660;</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="field">
+    <label>Default Playback Speed</label>
+    <div class="input-row">
+      <input type="number" id="defaultSpeed" min="0.0625" max="16" step="0.05" value="1.00">
+      <span class="suffix">×</span>
+      <div class="spin-btns">
+        <button data-target="defaultSpeed" data-dir="1">&#9650;</button>
+        <button data-target="defaultSpeed" data-dir="-1">&#9660;</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="hotkey-row">
+    <div class="field">
+      <label>Slower Key</label>
+      <input class="hotkey-input" id="hotkeyDec" type="text" maxlength="1" value="[" readonly>
+    </div>
+    <div class="field">
+      <label>Faster Key</label>
+      <input class="hotkey-input" id="hotkeyInc" type="text" maxlength="1" value="]" readonly>
+    </div>
+  </div>
+  <div class="hint">Click a key field, then press the desired key.</div>
+
+  <div class="saved-msg" id="saved">Settings saved</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
