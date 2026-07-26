@@ -14,7 +14,7 @@
 
   let config = { ...DEFAULTS };
   const managedVideos = new WeakSet();
-  const videoOverlayPairs = []; // { video, bar, host, updateLabel }
+  const videoOverlayPairs = []; // { video, bar, host, updateLabel, showOverlay, hideOverlay, ... }
 
   /* ── Load config from storage ───────────────────────────────── */
   function loadConfig(cb) {
@@ -56,35 +56,120 @@
     });
   }
 
-  /* ── Visibility / fade logic ────────────────────────────────── */
-  let globalTimer = null;
-  let isHoveringBar = false;
-  const allOverlays = new Set();
+  /* ── Per-overlay visibility via bounding-box hit test ────────── */
+  /* Each pair has its own { timer, hoveringBar } state.
+     The global mousemove checks cursor vs. each <video>'s bbox —
+     overlays only appear when the cursor is geometrically inside the
+     video rect, ignoring any DOM layers stacked above it. */
 
-  function showAllOverlays() {
-    allOverlays.forEach((el) => {
-      el.style.opacity = "1";
-      el.style.pointerEvents = "auto";
-    });
-    scheduleHide();
+  function pointInRect(x, y, r) {
+    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
   }
 
-  function scheduleHide() {
-    clearTimeout(globalTimer);
-    const delay = isHoveringBar ? HIDE_DELAY_HOVER : HIDE_DELAY_NORMAL;
-    globalTimer = setTimeout(hideAllOverlays, delay);
-  }
+  document.addEventListener(
+    "mousemove",
+    (e) => {
+      const mx = e.clientX;
+      const my = e.clientY;
+      for (const pair of videoOverlayPairs) {
+        const rect = pair.video.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) continue;
+        pair.updateHostRect(rect);
+        if (pointInRect(mx, my, rect)) {
+          pair.cursorInside = true;
+          if (!pair.isHoveringBar()) pair.showOverlay();
+        } else if (pair.cursorInside) {
+          /* Cursor just left the video bbox — hide immediately */
+          pair.cursorInside = false;
+          pair.hideOverlay(true);
+        }
+      }
+    },
+    { passive: true }
+  );
 
-  function hideAllOverlays() {
-    if (isHoveringBar) return;
-    allOverlays.forEach((el) => {
-      el.style.opacity = "0";
-      el.style.pointerEvents = "none";
-    });
-  }
+  /* ── Right-mouse-held + scroll → speed change ────────────────── */
+  /* Only intercepts the wheel event while the right mouse button is
+     physically held down AND the cursor is over a managed video's
+     bbox (reusing the same cursorInside flag the fade logic keeps
+     up to date above). Any other wheel usage — including scripts
+     like a YouTube audio adjuster listening for plain scroll — is
+     left completely untouched.
 
-  /* Global mouse-move listener (catches overlay UIs like Instagram) */
-  document.addEventListener("mousemove", showAllOverlays, { passive: true });
+     All of these are bound on `window` (not `document`) in the
+     capture phase. Capture always visits window before document
+     before anything deeper — so this runs before a page's own
+     handlers no matter when THEIR script registered, which matters
+     because a site's script (e.g. YouTube's in-page custom
+     right-click menu with Loop / Stats for nerds / etc.) typically
+     runs well before this content script (injected at
+     document_idle). Two capture listeners on the *same* target fire
+     in registration order, so being on document alone wasn't enough
+     to guarantee we go first — window does. */
+  let rightMouseDown = false;
+  let scrollUsedDuringHold = false;
+
+  window.addEventListener(
+    "mousedown",
+    (e) => {
+      if (e.button === 2) {
+        rightMouseDown = true;
+        scrollUsedDuringHold = false; // fresh hold, nothing consumed yet
+      }
+    },
+    true
+  );
+  window.addEventListener(
+    "mouseup",
+    (e) => {
+      if (e.button === 2) rightMouseDown = false;
+    },
+    true
+  );
+  window.addEventListener("blur", () => {
+    rightMouseDown = false;
+  });
+
+  window.addEventListener(
+    "wheel",
+    (e) => {
+      if (!rightMouseDown) return;
+      const pair = videoOverlayPairs.find((p) => p.cursorInside);
+      if (!pair) return;
+
+      /* stopImmediatePropagation so this never reaches other scroll
+         listeners (e.g. an audio-volume script) while the right
+         button is down over a video. */
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      scrollUsedDuringHold = true;
+
+      const direction = e.deltaY < 0 ? 1 : -1;
+      pair.video.playbackRate = clampRate(pair.video.playbackRate + config.delta * direction);
+      pair.updateLabel();
+      pair.showOverlay();
+    },
+    { capture: true, passive: false }
+  );
+
+  /* contextmenu fires on right-button release. If we used the hold to
+     change speed, block it here — both the native browser menu via
+     preventDefault, and any in-page custom menu (like YouTube's) via
+     stopImmediatePropagation, since that stops the event before it
+     ever reaches the site's own contextmenu listener. */
+  window.addEventListener(
+    "contextmenu",
+    (e) => {
+      if (scrollUsedDuringHold) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        scrollUsedDuringHold = false;
+      }
+    },
+    true
+  );
 
   /* ── Hotkey listener ────────────────────────────────────────── */
   document.addEventListener("keydown", (e) => {
@@ -94,11 +179,11 @@
 
     if (e.key === config.hotkeyDec || e.key === config.hotkeyInc) {
       const direction = e.key === config.hotkeyInc ? 1 : -1;
-      videoOverlayPairs.forEach(({ video, updateLabel }) => {
+      videoOverlayPairs.forEach(({ video, updateLabel, showOverlay }) => {
         video.playbackRate = clampRate(video.playbackRate + config.delta * direction);
         updateLabel();
+        showOverlay();
       });
-      showAllOverlays();
       e.preventDefault();
     }
   });
@@ -111,11 +196,24 @@
     /* Apply default speed */
     video.playbackRate = config.defaultSpeed;
 
-    /* Shadow DOM host so page CSS can't leak in */
+    /* Shadow DOM host so page CSS can't leak in.
+       Positioned fixed and synced to the video's own getBoundingClientRect()
+       (the same rect the bbox fade-logic already tracks) rather than sized
+       to the parent element — the parent can be larger than the video
+       itself (e.g. YouTube theater mode letterboxing), which previously
+       left the bar pinned to the parent's corner instead of the video's. */
     const host = document.createElement("div");
     host.className = "vsc-overlay-host";
     host.style.cssText =
-      "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2147483647;";
+      "position:fixed;top:0;left:0;width:0;height:0;pointer-events:none;z-index:2147483647;";
+
+    function updateHostRect(rect) {
+      const r = rect || video.getBoundingClientRect();
+      host.style.top = r.top + "px";
+      host.style.left = r.left + "px";
+      host.style.width = r.width + "px";
+      host.style.height = r.height + "px";
+    }
 
     const shadow = host.attachShadow({ mode: "closed" });
     shadow.innerHTML = `
@@ -139,7 +237,7 @@
           color: rgba(255, 255, 255, 0.88);
           user-select: none;
           pointer-events: auto;
-          opacity: 1;
+          opacity: 0;
           transition: opacity 0.35s ease;
           overflow: hidden;
         }
@@ -182,14 +280,54 @@
     const decBtn = shadow.getElementById("vsc-dec");
     const incBtn = shadow.getElementById("vsc-inc");
 
-    allOverlays.add(bar);
-
     function updateLabel() {
       rateLabel.textContent = fmtRate(video.playbackRate);
     }
 
-    const pair = { video, bar, host, updateLabel };
+    /* ── Per-overlay visibility state ─────────────────────────── */
+    let hideTimer = null;
+    let hoveringBar = false;
+
+    function showOverlay() {
+      bar.style.opacity = "1";
+      bar.style.pointerEvents = "auto";
+      clearTimeout(hideTimer);
+      const delay = hoveringBar ? HIDE_DELAY_HOVER : HIDE_DELAY_NORMAL;
+      hideTimer = setTimeout(() => hideOverlay(false), delay);
+    }
+
+    function hideOverlay(force) {
+      /* force=true: bbox exit — always hide, even if hovering the bar
+         force=false: timer expiry — respect the hoveringBar guard */
+      if (!force && hoveringBar) return;
+      clearTimeout(hideTimer);
+      hoveringBar = false;
+      bar.style.opacity = "0";
+      bar.style.pointerEvents = "none";
+    }
+
+    /* Register the pair (with show/hide methods for the global mousemove & hotkeys) */
+    const pair = {
+      video,
+      bar,
+      host,
+      updateLabel,
+      showOverlay,
+      hideOverlay,
+      updateHostRect,
+      cursorInside: false,
+      isHoveringBar: () => hoveringBar,
+    };
     videoOverlayPairs.push(pair);
+
+    /* Keep the host aligned even when the mouse isn't moving — window
+       resizes, scrolling, entering/leaving theater or fullscreen mode,
+       etc. The mousemove loop above also calls updateHostRect on every
+       move, so this mainly covers the no-mouse-movement cases. */
+    const resizeObserver = new ResizeObserver(() => updateHostRect());
+    resizeObserver.observe(video);
+    window.addEventListener("resize", () => updateHostRect());
+    window.addEventListener("scroll", () => updateHostRect(), { capture: true, passive: true });
 
     function adjustSpeed(direction) {
       video.playbackRate = clampRate(video.playbackRate + config.delta * direction);
@@ -215,7 +353,7 @@
         e.stopPropagation();
         e.preventDefault();
         adjustSpeed(e.deltaY < 0 ? 1 : -1);
-        showAllOverlays();
+        showOverlay();
       },
       { passive: false }
     );
@@ -225,30 +363,33 @@
 
     /* Hover on bar: switch to longer 10s timeout */
     bar.addEventListener("mouseenter", () => {
-      isHoveringBar = true;
-      clearTimeout(globalTimer);
+      hoveringBar = true;
+      clearTimeout(hideTimer);
       bar.style.opacity = "1";
       bar.style.pointerEvents = "auto";
-      scheduleHide();
+      hideTimer = setTimeout(() => hideOverlay(false), HIDE_DELAY_HOVER);
     });
     bar.addEventListener("mouseleave", () => {
-      isHoveringBar = false;
-      scheduleHide();
+      hoveringBar = false;
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => hideOverlay(false), HIDE_DELAY_NORMAL);
     });
 
-    /* Insert overlay — need a positioned parent */
-    ensurePositionedParent(video);
-    video.parentElement.appendChild(host);
+    /* Insert overlay directly on body — position is fully self-managed
+       via updateHostRect(), so it no longer depends on the parent
+       element's box matching the video's. */
+    document.body.appendChild(host);
+    updateHostRect();
 
-    /* Show briefly on attach, then auto-hide */
-    showAllOverlays();
+    /* Overlay starts hidden — only appears on mouse-in-bbox */
 
     /* Cleanup if video removed from DOM */
     const mo = new MutationObserver(() => {
       if (!document.contains(video)) {
-        allOverlays.delete(bar);
         host.remove();
         mo.disconnect();
+        resizeObserver.disconnect();
+        clearTimeout(hideTimer);
         const idx = videoOverlayPairs.indexOf(pair);
         if (idx >= 0) videoOverlayPairs.splice(idx, 1);
       }
@@ -263,15 +404,6 @@
 
   function clampRate(r) {
     return Math.min(16, Math.max(0.0625, Math.round(r * 1000) / 1000));
-  }
-
-  function ensurePositionedParent(video) {
-    const parent = video.parentElement;
-    if (!parent) return;
-    const pos = getComputedStyle(parent).position;
-    if (pos === "static" || pos === "") {
-      parent.style.position = "relative";
-    }
   }
 
   /* ── Scan & observe for <video> elements ────────────────────── */
