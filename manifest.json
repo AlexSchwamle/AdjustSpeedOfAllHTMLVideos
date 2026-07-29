@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Video Speed Controller",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Overlay playback speed controls on HTML5 video elements.",
   "permissions": ["storage", "activeTab"],
   "icons": {

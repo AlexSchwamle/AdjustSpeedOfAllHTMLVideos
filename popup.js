@@ -4,11 +4,13 @@
     defaultSpeed: "vsc_defaultSpeed",
     hotkeyDec: "vsc_hotkeyDec",
     hotkeyInc: "vsc_hotkeyInc",
+    volumeStep: "vsc_volumeStep",
   };
-  const DEFAULTS = { delta: 0.05, defaultSpeed: 1.0, hotkeyDec: "[", hotkeyInc: "]" };
+  const DEFAULTS = { delta: 0.05, defaultSpeed: 1.0, hotkeyDec: "[", hotkeyInc: "]", volumeStep: 5 };
 
   const deltaInput = document.getElementById("delta");
   const speedInput = document.getElementById("defaultSpeed");
+  const volumeStepInput = document.getElementById("volumeStep");
   const hotkeyDecInput = document.getElementById("hotkeyDec");
   const hotkeyIncInput = document.getElementById("hotkeyInc");
   const savedMsg = document.getElementById("saved");
@@ -21,6 +23,9 @@
     speedInput.value = (
       res[KEYS.defaultSpeed] != null ? parseFloat(res[KEYS.defaultSpeed]) : DEFAULTS.defaultSpeed
     ).toFixed(2);
+    volumeStepInput.value = (
+      res[KEYS.volumeStep] != null ? parseFloat(res[KEYS.volumeStep]) : DEFAULTS.volumeStep
+    ).toFixed(2);
     hotkeyDecInput.value = res[KEYS.hotkeyDec] || DEFAULTS.hotkeyDec;
     hotkeyIncInput.value = res[KEYS.hotkeyInc] || DEFAULTS.hotkeyInc;
   });
@@ -29,14 +34,17 @@
   function save() {
     const d = Math.max(0.01, Math.min(5, parseFloat(deltaInput.value) || DEFAULTS.delta));
     const s = Math.max(0.0625, Math.min(16, parseFloat(speedInput.value) || DEFAULTS.defaultSpeed));
+    const v = Math.max(0.1, Math.min(100, parseFloat(volumeStepInput.value) || DEFAULTS.volumeStep));
 
     deltaInput.value = d.toFixed(2);
     speedInput.value = s.toFixed(2);
+    volumeStepInput.value = v.toFixed(2);
 
     chrome.storage.sync.set(
       {
         [KEYS.delta]: d,
         [KEYS.defaultSpeed]: s,
+        [KEYS.volumeStep]: v,
         [KEYS.hotkeyDec]: hotkeyDecInput.value || DEFAULTS.hotkeyDec,
         [KEYS.hotkeyInc]: hotkeyIncInput.value || DEFAULTS.hotkeyInc,
       },
@@ -53,8 +61,10 @@
   /* Numeric inputs: save on change AND on input (for spin buttons / typing) */
   deltaInput.addEventListener("change", save);
   speedInput.addEventListener("change", save);
+  volumeStepInput.addEventListener("change", save);
   deltaInput.addEventListener("input", debounce(save, 400));
   speedInput.addEventListener("input", debounce(save, 400));
+  volumeStepInput.addEventListener("input", debounce(save, 400));
 
   /* ── Spin buttons ─────────────────────────────────────────── */
   document.querySelectorAll(".spin-btns button").forEach((btn) => {

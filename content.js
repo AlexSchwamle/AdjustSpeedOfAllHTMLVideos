@@ -6,8 +6,14 @@
     defaultSpeed: "vsc_defaultSpeed",
     hotkeyDec: "vsc_hotkeyDec",
     hotkeyInc: "vsc_hotkeyInc",
+    volumeStep: "vsc_volumeStep",
+    volume: "vsc_volume",
   };
-  const DEFAULTS = { delta: 0.05, defaultSpeed: 1.0, hotkeyDec: "[", hotkeyInc: "]" };
+  const DEFAULTS = { delta: 0.05, defaultSpeed: 1.0, hotkeyDec: "[", hotkeyInc: "]", volumeStep: 5 };
+  /* config.volume is intentionally left unset until the person actually
+     scrolls once — before that, videos just keep whatever volume the
+     page itself sets. Once set, it's the shared "last used volume" that
+     every managed video (current tab and others) adopts. */
 
   const HIDE_DELAY_NORMAL = 3000;
   const HIDE_DELAY_HOVER = 10000;
@@ -28,6 +34,10 @@
           config.hotkeyDec = res[STORAGE_KEYS.hotkeyDec];
         if (res[STORAGE_KEYS.hotkeyInc] != null)
           config.hotkeyInc = res[STORAGE_KEYS.hotkeyInc];
+        if (res[STORAGE_KEYS.volumeStep] != null)
+          config.volumeStep = parseFloat(res[STORAGE_KEYS.volumeStep]);
+        if (res[STORAGE_KEYS.volume] != null)
+          config.volume = parseFloat(res[STORAGE_KEYS.volume]);
         if (cb) cb();
       });
     } else if (cb) cb();
@@ -45,6 +55,18 @@
         config.hotkeyDec = changes[STORAGE_KEYS.hotkeyDec].newValue;
       if (changes[STORAGE_KEYS.hotkeyInc]?.newValue != null)
         config.hotkeyInc = changes[STORAGE_KEYS.hotkeyInc].newValue;
+      if (changes[STORAGE_KEYS.volumeStep]?.newValue != null)
+        config.volumeStep = parseFloat(changes[STORAGE_KEYS.volumeStep].newValue);
+      if (changes[STORAGE_KEYS.volume]?.newValue != null) {
+        config.volume = parseFloat(changes[STORAGE_KEYS.volume].newValue);
+        /* Applies to every managed video, including ones on other tabs/
+           pages — this is what makes "the next video I see" pick up the
+           last-used volume. No toast here; that's reserved for the
+           video actually being scrolled over. */
+        videoOverlayPairs.forEach(({ video }) => {
+          video.volume = config.volume;
+        });
+      }
 
       /* Apply new default speed to all existing videos immediately */
       if (changes[STORAGE_KEYS.defaultSpeed]?.newValue != null) {
@@ -130,25 +152,50 @@
     rightMouseDown = false;
   });
 
+  /* ── Scroll → volume (plain) / speed (right-click held) ───────── */
+  /* Any scroll while the cursor is over a managed video is now ours:
+     plain scroll adjusts .volume, right-click-held scroll adjusts
+     speed (above). Scrolling anywhere NOT over a managed video is
+     left completely alone. Note this does mean plain-scroll-over-video
+     is no longer available to other page/user scripts (e.g. a
+     separate YouTube volume-scroll script) — this feature takes that
+     role over natively for every video on every site. */
+  let volumeSaveTimer = null;
+  function persistVolume(vol) {
+    clearTimeout(volumeSaveTimer);
+    volumeSaveTimer = setTimeout(() => {
+      if (chrome?.storage?.sync) chrome.storage.sync.set({ [STORAGE_KEYS.volume]: vol });
+    }, 300);
+  }
+
   window.addEventListener(
     "wheel",
     (e) => {
-      if (!rightMouseDown) return;
       const pair = videoOverlayPairs.find((p) => p.cursorInside);
       if (!pair) return;
 
       /* stopImmediatePropagation so this never reaches other scroll
-         listeners (e.g. an audio-volume script) while the right
-         button is down over a video. */
+         listeners while the cursor is over a managed video. */
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
-      scrollUsedDuringHold = true;
 
       const direction = e.deltaY < 0 ? 1 : -1;
-      pair.video.playbackRate = clampRate(pair.video.playbackRate + config.delta * direction);
-      pair.updateLabel();
-      pair.showOverlay();
+
+      if (rightMouseDown) {
+        scrollUsedDuringHold = true;
+        pair.video.playbackRate = clampRate(pair.video.playbackRate + config.delta * direction);
+        pair.updateLabel();
+        pair.showOverlay();
+        return;
+      }
+
+      const step = (config.volumeStep ?? DEFAULTS.volumeStep) / 100;
+      const newVol = clampVolume(pair.video.volume + step * direction);
+      pair.video.volume = newVol;
+      config.volume = newVol;
+      pair.showVolumeToast(newVol);
+      persistVolume(newVol);
     },
     { capture: true, passive: false }
   );
@@ -195,6 +242,8 @@
 
     /* Apply default speed */
     video.playbackRate = config.defaultSpeed;
+    /* Apply last-used volume, if one has ever been set via scroll */
+    if (config.volume != null) video.volume = config.volume;
 
     /* Shadow DOM host so page CSS can't leak in.
        Positioned fixed and synced to the video's own getBoundingClientRect()
@@ -267,21 +316,55 @@
           letter-spacing: -0.02em;
           cursor: default;
         }
+        #vsc-volume-toast {
+          position: absolute;
+          top: 10px;
+          left: 50%;
+          transform: translateX(-50%);
+          font-family: "SF Mono", "Consolas", "Menlo", monospace;
+          font-size: 28px;
+          font-weight: 800;
+          color: #ffffff;
+          -webkit-text-stroke: 3px #000000;
+          paint-order: stroke fill;
+          letter-spacing: -0.02em;
+          user-select: none;
+          pointer-events: none;
+          opacity: 0;
+          transition: opacity 0.15s ease;
+          white-space: nowrap;
+        }
+        #vsc-volume-toast.show {
+          opacity: 1;
+        }
       </style>
       <div id="vsc-bar">
         <button class="vsc-btn" id="vsc-dec" title="Decrease speed">&minus;</button>
         <span id="vsc-rate">${fmtRate(video.playbackRate)}</span>
         <button class="vsc-btn" id="vsc-inc" title="Increase speed">+</button>
       </div>
+      <div id="vsc-volume-toast"></div>
     `;
 
     const bar = shadow.getElementById("vsc-bar");
     const rateLabel = shadow.getElementById("vsc-rate");
     const decBtn = shadow.getElementById("vsc-dec");
     const incBtn = shadow.getElementById("vsc-inc");
+    const volumeToast = shadow.getElementById("vsc-volume-toast");
 
     function updateLabel() {
       rateLabel.textContent = fmtRate(video.playbackRate);
+    }
+
+    /* Shows the current volume centered near the top of the video for
+       1 second, resetting the hide timer on every scroll tick so a
+       continuous scroll keeps it visible without flicker. */
+    let volumeHideTimer = null;
+    function showVolumeToast(vol) {
+      volumeToast.textContent = Math.round(vol * 100) + "%";
+      volumeToast.classList.add("show");
+      clearTimeout(volumeHideTimer);
+      volumeHideTimer = setTimeout(() => volumeToast.classList.remove("show"), 1000);
     }
 
     /* ── Per-overlay visibility state ─────────────────────────── */
@@ -315,6 +398,7 @@
       showOverlay,
       hideOverlay,
       updateHostRect,
+      showVolumeToast,
       cursorInside: false,
       isHoveringBar: () => hoveringBar,
     };
@@ -390,6 +474,7 @@
         mo.disconnect();
         resizeObserver.disconnect();
         clearTimeout(hideTimer);
+        clearTimeout(volumeHideTimer);
         const idx = videoOverlayPairs.indexOf(pair);
         if (idx >= 0) videoOverlayPairs.splice(idx, 1);
       }
@@ -404,6 +489,10 @@
 
   function clampRate(r) {
     return Math.min(16, Math.max(0.0625, Math.round(r * 1000) / 1000));
+  }
+
+  function clampVolume(v) {
+    return Math.min(1, Math.max(0, Math.round(v * 1000) / 1000));
   }
 
   /* ── Scan & observe for <video> elements ────────────────────── */
