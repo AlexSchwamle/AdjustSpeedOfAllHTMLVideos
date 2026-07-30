@@ -1,19 +1,22 @@
 (() => {
   "use strict";
 
-  const STORAGE_KEYS = {
+  const SYNC_KEYS = {
     delta: "vsc_delta",
     defaultSpeed: "vsc_defaultSpeed",
     hotkeyDec: "vsc_hotkeyDec",
     hotkeyInc: "vsc_hotkeyInc",
     volumeStep: "vsc_volumeStep",
-    volume: "vsc_volume",
   };
-  const DEFAULTS = { delta: 0.05, defaultSpeed: 1.0, hotkeyDec: "[", hotkeyInc: "]", volumeStep: 5 };
-  /* config.volume is intentionally left unset until the person actually
-     scrolls once — before that, videos just keep whatever volume the
-     page itself sets. Once set, it's the shared "last used volume" that
-     every managed video (current tab and others) adopts. */
+  const LOCAL_KEYS = { volume: "vsc_volume" };
+  const DEFAULTS = {
+    delta: 0.05,
+    defaultSpeed: 1.0,
+    hotkeyDec: "[",
+    hotkeyInc: "]",
+    volumeStep: 5,
+    volume: 1.0,
+  };
 
   const HIDE_DELAY_NORMAL = 3000;
   const HIDE_DELAY_HOVER = 10000;
@@ -24,56 +27,69 @@
 
   /* ── Load config from storage ───────────────────────────────── */
   function loadConfig(cb) {
+    let pending = 0;
+    let done = 0;
+    function maybeFinish() {
+      done++;
+      if (done >= pending && cb) cb();
+    }
+
     if (chrome?.storage?.sync) {
-      chrome.storage.sync.get(Object.values(STORAGE_KEYS), (res) => {
-        if (res[STORAGE_KEYS.delta] != null)
-          config.delta = parseFloat(res[STORAGE_KEYS.delta]);
-        if (res[STORAGE_KEYS.defaultSpeed] != null)
-          config.defaultSpeed = parseFloat(res[STORAGE_KEYS.defaultSpeed]);
-        if (res[STORAGE_KEYS.hotkeyDec] != null)
-          config.hotkeyDec = res[STORAGE_KEYS.hotkeyDec];
-        if (res[STORAGE_KEYS.hotkeyInc] != null)
-          config.hotkeyInc = res[STORAGE_KEYS.hotkeyInc];
-        if (res[STORAGE_KEYS.volumeStep] != null)
-          config.volumeStep = parseFloat(res[STORAGE_KEYS.volumeStep]);
-        if (res[STORAGE_KEYS.volume] != null)
-          config.volume = parseFloat(res[STORAGE_KEYS.volume]);
-        if (cb) cb();
+      pending++;
+      chrome.storage.sync.get(Object.values(SYNC_KEYS), (res) => {
+        if (chrome.runtime.lastError) console.warn("VSC sync load failed:", chrome.runtime.lastError.message);
+        if (res[SYNC_KEYS.delta] != null) config.delta = parseFloat(res[SYNC_KEYS.delta]);
+        if (res[SYNC_KEYS.defaultSpeed] != null) config.defaultSpeed = parseFloat(res[SYNC_KEYS.defaultSpeed]);
+        if (res[SYNC_KEYS.hotkeyDec] != null) config.hotkeyDec = res[SYNC_KEYS.hotkeyDec];
+        if (res[SYNC_KEYS.hotkeyInc] != null) config.hotkeyInc = res[SYNC_KEYS.hotkeyInc];
+        if (res[SYNC_KEYS.volumeStep] != null) config.volumeStep = parseFloat(res[SYNC_KEYS.volumeStep]);
+        maybeFinish();
       });
-    } else if (cb) cb();
+    }
+    if (chrome?.storage?.local) {
+      pending++;
+      chrome.storage.local.get([LOCAL_KEYS.volume], (res) => {
+        if (chrome.runtime.lastError) console.warn("VSC local load failed:", chrome.runtime.lastError.message);
+        if (res[LOCAL_KEYS.volume] != null) config.volume = parseFloat(res[LOCAL_KEYS.volume]);
+        maybeFinish();
+      });
+    }
+    if (pending === 0 && cb) cb();
   }
 
-  /* Listen for config changes from popup — applies instantly to ALL tabs */
+  /* Listen for config changes from popup / other tabs — applies instantly everywhere */
   if (chrome?.storage?.onChanged) {
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area !== "sync") return;
-      if (changes[STORAGE_KEYS.delta]?.newValue != null)
-        config.delta = parseFloat(changes[STORAGE_KEYS.delta].newValue);
-      if (changes[STORAGE_KEYS.defaultSpeed]?.newValue != null)
-        config.defaultSpeed = parseFloat(changes[STORAGE_KEYS.defaultSpeed].newValue);
-      if (changes[STORAGE_KEYS.hotkeyDec]?.newValue != null)
-        config.hotkeyDec = changes[STORAGE_KEYS.hotkeyDec].newValue;
-      if (changes[STORAGE_KEYS.hotkeyInc]?.newValue != null)
-        config.hotkeyInc = changes[STORAGE_KEYS.hotkeyInc].newValue;
-      if (changes[STORAGE_KEYS.volumeStep]?.newValue != null)
-        config.volumeStep = parseFloat(changes[STORAGE_KEYS.volumeStep].newValue);
-      if (changes[STORAGE_KEYS.volume]?.newValue != null) {
-        config.volume = parseFloat(changes[STORAGE_KEYS.volume].newValue);
-        /* Applies to every managed video, including ones on other tabs/
-           pages — this is what makes "the next video I see" pick up the
-           last-used volume. No toast here; that's reserved for the
-           video actually being scrolled over. */
-        videoOverlayPairs.forEach(({ video }) => {
-          video.volume = config.volume;
-        });
-      }
+      if (area === "sync") {
+        if (changes[SYNC_KEYS.delta]?.newValue != null)
+          config.delta = parseFloat(changes[SYNC_KEYS.delta].newValue);
+        if (changes[SYNC_KEYS.defaultSpeed]?.newValue != null)
+          config.defaultSpeed = parseFloat(changes[SYNC_KEYS.defaultSpeed].newValue);
+        if (changes[SYNC_KEYS.hotkeyDec]?.newValue != null)
+          config.hotkeyDec = changes[SYNC_KEYS.hotkeyDec].newValue;
+        if (changes[SYNC_KEYS.hotkeyInc]?.newValue != null)
+          config.hotkeyInc = changes[SYNC_KEYS.hotkeyInc].newValue;
+        if (changes[SYNC_KEYS.volumeStep]?.newValue != null)
+          config.volumeStep = parseFloat(changes[SYNC_KEYS.volumeStep].newValue);
 
-      /* Apply new default speed to all existing videos immediately */
-      if (changes[STORAGE_KEYS.defaultSpeed]?.newValue != null) {
-        videoOverlayPairs.forEach(({ video, updateLabel }) => {
-          video.playbackRate = config.defaultSpeed;
-          updateLabel();
-        });
+        /* Apply new default speed to all existing videos immediately */
+        if (changes[SYNC_KEYS.defaultSpeed]?.newValue != null) {
+          videoOverlayPairs.forEach(({ video, updateLabel }) => {
+            video.playbackRate = config.defaultSpeed;
+            updateLabel();
+          });
+        }
+      } else if (area === "local") {
+        if (changes[LOCAL_KEYS.volume]?.newValue != null) {
+          config.volume = parseFloat(changes[LOCAL_KEYS.volume].newValue);
+          /* Applies to every managed video, including ones on other tabs/
+             pages — this is what makes "the next video I see" pick up the
+             last-used volume. No toast here; that's reserved for the
+             video actually being scrolled over. */
+          videoOverlayPairs.forEach(({ video }) => {
+            video.volume = config.volume;
+          });
+        }
       }
     });
   }
@@ -129,7 +145,9 @@
      in registration order, so being on document alone wasn't enough
      to guarantee we go first — window does. */
   let rightMouseDown = false;
+  let leftMouseDown = false;
   let scrollUsedDuringHold = false;
+  const FINE_VOLUME_STEP_PERCENT = 1; // left-click-held scroll always uses this, ignoring the configured Volume Step
 
   window.addEventListener(
     "mousedown",
@@ -137,6 +155,8 @@
       if (e.button === 2) {
         rightMouseDown = true;
         scrollUsedDuringHold = false; // fresh hold, nothing consumed yet
+      } else if (e.button === 0) {
+        leftMouseDown = true;
       }
     },
     true
@@ -145,27 +165,36 @@
     "mouseup",
     (e) => {
       if (e.button === 2) rightMouseDown = false;
+      else if (e.button === 0) leftMouseDown = false;
     },
     true
   );
   window.addEventListener("blur", () => {
     rightMouseDown = false;
+    leftMouseDown = false;
   });
 
-  /* ── Scroll → volume (plain) / speed (right-click held) ───────── */
+  /* ── Scroll → volume (plain / left-click held = fine) or speed (right-click held) ── */
   /* Any scroll while the cursor is over a managed video is now ours:
-     plain scroll adjusts .volume, right-click-held scroll adjusts
-     speed (above). Scrolling anywhere NOT over a managed video is
-     left completely alone. Note this does mean plain-scroll-over-video
-     is no longer available to other page/user scripts (e.g. a
-     separate YouTube volume-scroll script) — this feature takes that
-     role over natively for every video on every site. */
+     plain scroll adjusts .volume (left-click held = a fine 1% step
+     instead of the configured Volume Step, for small corrections),
+     right-click-held scroll adjusts speed (above). Scrolling anywhere
+     NOT over a managed video is left completely alone. Note this does
+     mean plain-scroll-over-video is no longer available to other
+     page/user scripts (e.g. a separate YouTube volume-scroll script)
+     — this feature takes that role over natively for every video on
+     every site. */
   let volumeSaveTimer = null;
   function persistVolume(vol) {
     clearTimeout(volumeSaveTimer);
+    /* Matches the volume toast's own 1s auto-hide — the write lands
+       right as the UI fades, instead of on every single wheel tick. */
     volumeSaveTimer = setTimeout(() => {
-      if (chrome?.storage?.sync) chrome.storage.sync.set({ [STORAGE_KEYS.volume]: vol });
-    }, 300);
+      if (!chrome?.storage?.local) return;
+      chrome.storage.local.set({ [LOCAL_KEYS.volume]: vol }, () => {
+        if (chrome.runtime.lastError) console.warn("VSC volume save failed:", chrome.runtime.lastError.message);
+      });
+    }, 1000);
   }
 
   window.addEventListener(
@@ -190,8 +219,8 @@
         return;
       }
 
-      const step = (config.volumeStep ?? DEFAULTS.volumeStep) / 100;
-      const newVol = clampVolume(pair.video.volume + step * direction);
+      const stepPercent = leftMouseDown ? FINE_VOLUME_STEP_PERCENT : config.volumeStep ?? DEFAULTS.volumeStep;
+      const newVol = clampVolume(pair.video.volume + (stepPercent / 100) * direction);
       pair.video.volume = newVol;
       config.volume = newVol;
       pair.showVolumeToast(newVol);
@@ -242,8 +271,8 @@
 
     /* Apply default speed */
     video.playbackRate = config.defaultSpeed;
-    /* Apply last-used volume, if one has ever been set via scroll */
-    if (config.volume != null) video.volume = config.volume;
+    /* Apply the shared volume level */
+    video.volume = config.volume;
 
     /* Shadow DOM host so page CSS can't leak in.
        Positioned fixed and synced to the video's own getBoundingClientRect()
@@ -444,6 +473,22 @@
 
     /* Keep label in sync if something else changes the rate */
     video.addEventListener("ratechange", updateLabel);
+
+    /* Some sites (autoplay init, "unmute" buttons, feed videos loading
+       in, etc.) set their own .volume after we've already applied
+       ours — commonly resetting it to 1. Rather than a MutationObserver
+       or a one-time "did it stick" check, just listen for the video's
+       own volumechange and snap back if the new value isn't ours. The
+       epsilon guard means our own corrective assignment (which itself
+       fires another volumechange) is a no-op the second time through,
+       so this can't loop. This does mean any native on-page volume
+       control gets overridden too — intentional, so this extension
+       stays the single source of truth for volume. */
+    video.addEventListener("volumechange", () => {
+      if (Math.abs(video.volume - config.volume) > 0.0005) {
+        video.volume = config.volume;
+      }
+    });
 
     /* Hover on bar: switch to longer 10s timeout */
     bar.addEventListener("mouseenter", () => {
