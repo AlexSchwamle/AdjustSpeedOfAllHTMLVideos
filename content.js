@@ -97,7 +97,7 @@
              last-used volume. No toast here; that's reserved for the
              video actually being scrolled over. */
           videoOverlayPairs.forEach(({ video }) => {
-            video.volume = config.volume;
+            applyVolume(video, config.volume);
           });
         }
       }
@@ -407,8 +407,8 @@
 
       const stepPercent = middleMouseDown ? FINE_VOLUME_STEP_PERCENT : config.volumeStep ?? DEFAULTS.volumeStep;
       const newVol = clampVolume(pair.video.volume + (stepPercent / 100) * direction);
-      pair.video.volume = newVol;
       config.volume = newVol;
+      applyVolumeFromScroll(pair.video, newVol);
       pair.showVolumeToast(newVol);
       persistVolume(newVol);
     },
@@ -459,7 +459,7 @@
     /* Apply default speed */
     video.playbackRate = config.defaultSpeed;
     /* Apply the shared volume level */
-    video.volume = config.volume;
+    applyVolume(video, config.volume);
 
     /* Shadow DOM host so page CSS can't leak in.
        Positioned fixed and synced to the video's own getBoundingClientRect()
@@ -693,19 +693,20 @@
       updateLabel();
     });
 
-    /* Some sites (autoplay init, "unmute" buttons, feed videos loading
-       in, etc.) set their own .volume after we've already applied
-       ours — commonly resetting it to 1. Rather than a MutationObserver
-       or a one-time "did it stick" check, just listen for the video's
-       own volumechange and snap back if the new value isn't ours. The
-       epsilon guard means our own corrective assignment (which itself
-       fires another volumechange) is a no-op the second time through,
-       so this can't loop. This does mean any native on-page volume
-       control gets overridden too — intentional, so this extension
-       stays the single source of truth for volume. */
+    /* Some sites (autoplay init, feed videos loading in, etc.) set
+       their own .volume after we've already applied ours — commonly
+       resetting it to 1. Rather than a MutationObserver or a one-time
+       "did it stick" check, just listen for the video's own
+       volumechange and snap the level back if it isn't ours. This
+       deliberately leaves .muted alone — see applyVolume above for
+       why — so a site muting/unmuting the video on its own terms still
+       works; only the numeric level is enforced. The epsilon guard
+       means our own corrective assignment (which itself fires another
+       volumechange) is a no-op the second time through, so this can't
+       loop. */
     video.addEventListener("volumechange", () => {
       if (Math.abs(video.volume - config.volume) > 0.0005) {
-        video.volume = config.volume;
+        applyVolume(video, config.volume);
       }
     });
 
@@ -757,6 +758,26 @@
 
   function clampVolume(v) {
     return Math.min(1, Math.max(0, Math.round(v * 1000) / 1000));
+  }
+
+  /* Every place we set .volume funnels through here. This only ever
+     touches .volume — it deliberately does NOT touch .muted, so an
+     initially-muted video (autoplay defaults, a site's own preference,
+     etc.) stays muted through page load and cross-tab broadcasts.
+     Un-muting only happens as a direct result of the person actually
+     scrolling — see applyVolumeFromScroll below — since that's the one
+     case where "I'm adjusting volume" clearly implies "I want to hear
+     it," rather than us silently flipping mute state behind the scenes
+     on every video that loads. */
+  function applyVolume(video, vol) {
+    video.volume = vol;
+  }
+
+  /* Scroll-triggered volume changes also un-mute, since scrolling to a
+     specific level is an unambiguous signal the person wants audio. */
+  function applyVolumeFromScroll(video, vol) {
+    applyVolume(video, vol);
+    if (video.muted) video.muted = false;
   }
 
   /* ── Scan & observe for <video> elements ────────────────────── */

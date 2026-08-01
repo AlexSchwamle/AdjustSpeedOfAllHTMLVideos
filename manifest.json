@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Video Speed Controller",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Injects a playback speed UI & lets you scroll to change the volume on any HTML5 video. Holding left click speeds the video up to 2x, holding middle click and scrolling changes the volume by one percent, and holding right click and scrolling changes the speed.",
   "permissions": ["storage", "activeTab"],
   "icons": {
