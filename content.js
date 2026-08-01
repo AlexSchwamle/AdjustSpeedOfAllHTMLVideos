@@ -8,6 +8,16 @@
     hotkeyInc: "vsc_hotkeyInc",
     volumeStep: "vsc_volumeStep",
   };
+  /* Volume lives in chrome.storage.local, not sync. sync has a hard
+     write-rate quota (~120 writes/min, shared across every key this
+     extension stores) — scrolling volume can easily burst past that,
+     and once it's hit, writes silently fail unless you explicitly
+     check chrome.runtime.lastError. That's almost certainly why the
+     volume looked "sometimes persistent" — some writes landed, later
+     ones during a scroll session got dropped, and reads then quietly
+     fell back to whatever the last successful write happened to be.
+     local has no such write-frequency cap, so this removes the
+     problem instead of just working around it. */
   const LOCAL_KEYS = { volume: "vsc_volume" };
   const DEFAULTS = {
     delta: 0.05,
@@ -104,11 +114,18 @@
     return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
   }
 
+  /* Latest known cursor position, kept up to date here for the hold-boost
+     drift check below — cheaper than a second dedicated mousemove listener. */
+  let lastMouseX = 0;
+  let lastMouseY = 0;
+
   document.addEventListener(
     "mousemove",
     (e) => {
       const mx = e.clientX;
       const my = e.clientY;
+      lastMouseX = mx;
+      lastMouseY = my;
       for (const pair of videoOverlayPairs) {
         const rect = pair.video.getBoundingClientRect();
         if (rect.width === 0 && rect.height === 0) continue;
@@ -145,18 +162,131 @@
      in registration order, so being on document alone wasn't enough
      to guarantee we go first — window does. */
   let rightMouseDown = false;
-  let leftMouseDown = false;
+  let middleMouseDown = false;
   let scrollUsedDuringHold = false;
-  const FINE_VOLUME_STEP_PERCENT = 1; // left-click-held scroll always uses this, ignoring the configured Volume Step
+  const FINE_VOLUME_STEP_PERCENT = 1; // middle-click-held scroll always uses this, ignoring the configured Volume Step
+
+  /* ── Left-click-held on a video → 2x speed boost, released on mouseup ── */
+  /* Deliberately does NOT preventDefault/stopPropagation anything for
+     the left button — earlier attempts at that broke play/pause and
+     custom seek-bar dragging on sites (X) whose controls are separate
+     overlay elements sitting on top of the video but within the same
+     bounding box we use for "is the cursor over this video". There's
+     no reliable way to geometrically tell "the bare video surface"
+     apart from "the site's own scrubber drawn on top of it" — only
+     the DOM target could, and that's too site-specific to rely on —
+     so instead this only ever *reacts*: it lets every mousedown /
+     mouseup / click reach the page exactly as it normally would, and
+     fixes up the outcome afterward. Two corrections happen this way:
+     (1) the ratechange listener down in attachOverlay keeps snapping
+     the rate back to 2x for the duration of the hold, so a competing
+     native feature (YouTube ships this exact gesture) can't visibly
+     win; (2) the click listener below resumes playback shortly after
+     release if the hold's trailing click paused it. Neither approach
+     can ever break another site's own UI, since nothing is ever
+     blocked — worst case is a one-frame flicker before we correct it.
+
+     On top of that: dragging a seek bar (or any other custom control)
+     is itself a mousedown-then-move gesture, indistinguishable from a
+     hold at mousedown time. Rather than try to special-case every
+     site's own scrubber implementation — no universal signal for "a
+     drag is in progress" reliably exists; not every custom player
+     even sets video.seeking — this only engages the boost if the
+     cursor is still within HOLD_BOOST_MAX_DRIFT_PX of where the press
+     started once the threshold elapses. A real hold keeps the cursor
+     roughly put; a drag has already moved it. Moving fast enough to
+     clear that radius before the threshold fires still avoids the
+     boost; moving slower than that doesn't — an accepted tradeoff
+     rather than a fully general solution. */
+  const HOLD_BOOST_THRESHOLD_MS = 200;
+  const HOLD_BOOST_RATE = 2.0;
+  const HOLD_BOOST_MAX_DRIFT_PX = 10;
+  let holdBoostTimer = null;
+  let holdBoostPair = null;
+  let holdBoostPreRate = null;
+  let holdBoostActive = false;
+  let holdJustReleased = false;
+  let lastBoostedVideo = null;
+  let holdStartX = 0;
+  let holdStartY = 0;
+
+  function engageHoldBoost(pair) {
+    holdBoostActive = true;
+    holdBoostPreRate = pair.video.playbackRate;
+    if (pair.video.paused) pair.video.play().catch(() => {});
+    pair.video.playbackRate = HOLD_BOOST_RATE;
+    pair.updateLabel();
+    pair.showOverlay();
+    pair.showBoostIcon();
+  }
+
+  function releaseHoldBoost() {
+    clearTimeout(holdBoostTimer);
+    holdBoostTimer = null;
+    if (holdBoostActive && holdBoostPair) {
+      holdBoostPair.video.playbackRate = holdBoostPreRate;
+      holdBoostPair.updateLabel();
+      holdBoostPair.showOverlay();
+      holdBoostPair.hideBoostIcon();
+    }
+    holdBoostActive = false;
+    holdBoostPair = null;
+    holdBoostPreRate = null;
+  }
+
+  /* Tracks, per button, whether *this* press/release pair started over a
+     managed video (and not the overlay bar) and therefore got
+     intercepted — checked again at mouseup instead of re-querying
+     cursorInside, since the mouse may well have moved off the video (or
+     even off-window) by release time and we still need to swallow that
+     mouseup consistently. This still applies to middle/right, which
+     don't have the "must never block the page" constraint the left
+     button does (no click-to-pause or drag surface competes with a
+     scroll modifier or a context menu). */
+  let interceptRight = false;
+  let interceptMiddle = false;
+
+  function findVideoPair() {
+    return videoOverlayPairs.find((p) => p.cursorInside && !p.isHoveringBar());
+  }
 
   window.addEventListener(
     "mousedown",
     (e) => {
       if (e.button === 2) {
+        const pair = findVideoPair();
+        interceptRight = !!pair;
+        if (pair) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+        }
         rightMouseDown = true;
         scrollUsedDuringHold = false; // fresh hold, nothing consumed yet
+      } else if (e.button === 1) {
+        const pair = findVideoPair();
+        interceptMiddle = !!pair;
+        if (pair) {
+          e.preventDefault(); // also stops the browser's middle-click autoscroll/paste
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+        }
+        middleMouseDown = true;
       } else if (e.button === 0) {
-        leftMouseDown = true;
+        /* Purely passive — see the block comment above for why. */
+        const pair = findVideoPair();
+        if (pair) {
+          holdBoostPair = pair;
+          holdStartX = e.clientX;
+          holdStartY = e.clientY;
+          clearTimeout(holdBoostTimer);
+          holdBoostTimer = setTimeout(() => {
+            const dx = lastMouseX - holdStartX;
+            const dy = lastMouseY - holdStartY;
+            if (Math.sqrt(dx * dx + dy * dy) > HOLD_BOOST_MAX_DRIFT_PX) return; // moved — this is a drag/seek, not a hold
+            engageHoldBoost(pair);
+          }, HOLD_BOOST_THRESHOLD_MS);
+        }
       }
     },
     true
@@ -164,26 +294,73 @@
   window.addEventListener(
     "mouseup",
     (e) => {
-      if (e.button === 2) rightMouseDown = false;
-      else if (e.button === 0) leftMouseDown = false;
+      if (e.button === 2) {
+        if (interceptRight) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+        }
+        interceptRight = false;
+        rightMouseDown = false;
+      } else if (e.button === 1) {
+        if (interceptMiddle) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+        }
+        interceptMiddle = false;
+        middleMouseDown = false;
+      } else if (e.button === 0) {
+        const wasBoosted = holdBoostActive;
+        if (wasBoosted) lastBoostedVideo = holdBoostPair.video;
+        releaseHoldBoost();
+        holdJustReleased = wasBoosted;
+      }
+    },
+    true
+  );
+  window.addEventListener(
+    "click",
+    () => {
+      /* Purely observational — never preventDefault/stopPropagation
+         here, so the page's own click handling (pause toggle, or
+         anything else) always runs completely normally. If a hold
+         happened, we just want the video playing afterward regardless
+         of what that click did; scheduling this as a real task (not a
+         microtask) guarantees it runs after the click has finished
+         propagating through every listener on the page, including any
+         bubble-phase pause toggle that fires after us. */
+      if (!holdJustReleased) return;
+      holdJustReleased = false;
+      const video = lastBoostedVideo;
+      lastBoostedVideo = null;
+      if (!video) return;
+      setTimeout(() => {
+        if (video.paused) video.play().catch(() => {});
+      }, 0);
     },
     true
   );
   window.addEventListener("blur", () => {
     rightMouseDown = false;
-    leftMouseDown = false;
+    middleMouseDown = false;
+    interceptRight = false;
+    interceptMiddle = false;
+    releaseHoldBoost();
   });
 
-  /* ── Scroll → volume (plain / left-click held = fine) or speed (right-click held) ── */
+  /* ── Scroll → speed (bar-hover, or right-click held) or volume (plain / middle-click held = fine) ── */
   /* Any scroll while the cursor is over a managed video is now ours:
-     plain scroll adjusts .volume (left-click held = a fine 1% step
-     instead of the configured Volume Step, for small corrections),
-     right-click-held scroll adjusts speed (above). Scrolling anywhere
-     NOT over a managed video is left completely alone. Note this does
-     mean plain-scroll-over-video is no longer available to other
-     page/user scripts (e.g. a separate YouTube volume-scroll script)
-     — this feature takes that role over natively for every video on
-     every site. */
+     hovering the rate overlay bar itself always means "adjust speed"
+     regardless of mouse buttons (the bar IS the speed control, so it
+     should never touch volume); otherwise plain scroll adjusts
+     .volume (middle-click held = a fine 1% step instead of the
+     configured Volume Step, for small corrections), and right-click-
+     held scroll adjusts speed. Scrolling anywhere NOT over a managed
+     video is left completely alone. Note this does mean plain-scroll-
+     over-video is no longer available to other page/user scripts
+     (e.g. a separate YouTube volume-scroll script) — this feature
+     takes that role over natively for every video on every site. */
   let volumeSaveTimer = null;
   function persistVolume(vol) {
     clearTimeout(volumeSaveTimer);
@@ -211,15 +388,24 @@
 
       const direction = e.deltaY < 0 ? 1 : -1;
 
+      if (pair.isHoveringBar()) {
+        pair.video.playbackRate = clampRate(pair.video.playbackRate + config.delta * direction);
+        pair.updateLabel();
+        pair.showOverlay();
+        pair.showRateToast(pair.video.playbackRate);
+        return;
+      }
+
       if (rightMouseDown) {
         scrollUsedDuringHold = true;
         pair.video.playbackRate = clampRate(pair.video.playbackRate + config.delta * direction);
         pair.updateLabel();
         pair.showOverlay();
+        pair.showRateToast(pair.video.playbackRate);
         return;
       }
 
-      const stepPercent = leftMouseDown ? FINE_VOLUME_STEP_PERCENT : config.volumeStep ?? DEFAULTS.volumeStep;
+      const stepPercent = middleMouseDown ? FINE_VOLUME_STEP_PERCENT : config.volumeStep ?? DEFAULTS.volumeStep;
       const newVol = clampVolume(pair.video.volume + (stepPercent / 100) * direction);
       pair.video.volume = newVol;
       config.volume = newVol;
@@ -255,10 +441,11 @@
 
     if (e.key === config.hotkeyDec || e.key === config.hotkeyInc) {
       const direction = e.key === config.hotkeyInc ? 1 : -1;
-      videoOverlayPairs.forEach(({ video, updateLabel, showOverlay }) => {
+      videoOverlayPairs.forEach(({ video, updateLabel, showOverlay, showRateToast }) => {
         video.playbackRate = clampRate(video.playbackRate + config.delta * direction);
         updateLabel();
         showOverlay();
+        showRateToast(video.playbackRate);
       });
       e.preventDefault();
     }
@@ -345,25 +532,25 @@
           letter-spacing: -0.02em;
           cursor: default;
         }
-        #vsc-volume-toast {
+        #vsc-toast {
           position: absolute;
-          top: 10px;
+          top: 15px;
           left: 50%;
           transform: translateX(-50%);
           font-family: "SF Mono", "Consolas", "Menlo", monospace;
-          font-size: 28px;
+          font-size: 24px;
           font-weight: 800;
           color: #ffffff;
-          -webkit-text-stroke: 3px #000000;
+          -webkit-text-stroke: 2.5px #000000;
           paint-order: stroke fill;
-          letter-spacing: -0.02em;
+          letter-spacing: -0.01em;
           user-select: none;
           pointer-events: none;
           opacity: 0;
-          transition: opacity 0.15s ease;
+          transition: opacity 0.12s ease;
           white-space: nowrap;
         }
-        #vsc-volume-toast.show {
+        #vsc-toast.show {
           opacity: 1;
         }
       </style>
@@ -372,28 +559,58 @@
         <span id="vsc-rate">${fmtRate(video.playbackRate)}</span>
         <button class="vsc-btn" id="vsc-inc" title="Increase speed">+</button>
       </div>
-      <div id="vsc-volume-toast"></div>
+      <div id="vsc-toast"></div>
     `;
 
     const bar = shadow.getElementById("vsc-bar");
     const rateLabel = shadow.getElementById("vsc-rate");
     const decBtn = shadow.getElementById("vsc-dec");
     const incBtn = shadow.getElementById("vsc-inc");
-    const volumeToast = shadow.getElementById("vsc-volume-toast");
+    const toastEl = shadow.getElementById("vsc-toast");
 
     function updateLabel() {
       rateLabel.textContent = fmtRate(video.playbackRate);
     }
 
-    /* Shows the current volume centered near the top of the video for
-       1 second, resetting the hide timer on every scroll tick so a
-       continuous scroll keeps it visible without flicker. */
-    let volumeHideTimer = null;
+    /* Single generalized indicator shared by all three notification
+       types (2x boost / playback rate / volume) — only one is ever on
+       screen. Priority is 2x > rate > volume: while the boost is
+       active, calls to the temporary (rate/volume) toast are ignored
+       outright, so nothing can interrupt or flicker under it. Rate and
+       volume don't have a priority order between themselves — whichever
+       fires most recently just takes over the display and resets the
+       1s countdown, so e.g. scrolling volume then immediately hitting
+       a speed hotkey correctly swaps to the rate toast right away. */
+    let toastHideTimer = null;
+    let boostToastActive = false;
+
+    function showToast(text) {
+      if (boostToastActive) return;
+      toastEl.textContent = text;
+      toastEl.classList.add("show");
+      clearTimeout(toastHideTimer);
+      toastHideTimer = setTimeout(() => toastEl.classList.remove("show"), 1000);
+    }
+
     function showVolumeToast(vol) {
-      volumeToast.textContent = Math.round(vol * 100) + "%";
-      volumeToast.classList.add("show");
-      clearTimeout(volumeHideTimer);
-      volumeHideTimer = setTimeout(() => volumeToast.classList.remove("show"), 1000);
+      showToast(Math.round(vol * 100) + "%");
+    }
+
+    function showRateToast(rate) {
+      showToast(fmtRate(rate));
+    }
+
+    /* Persistent — no auto-hide timer, since it stays up for as long as
+       the left button is held; engage/release control it directly. */
+    function showBoostToast() {
+      boostToastActive = true;
+      clearTimeout(toastHideTimer);
+      toastEl.textContent = HOLD_BOOST_RATE.toFixed(0) + "x \u25B6\u25B6";
+      toastEl.classList.add("show");
+    }
+    function hideBoostToast() {
+      boostToastActive = false;
+      toastEl.classList.remove("show");
     }
 
     /* ── Per-overlay visibility state ─────────────────────────── */
@@ -428,6 +645,9 @@
       hideOverlay,
       updateHostRect,
       showVolumeToast,
+      showRateToast,
+      showBoostIcon: showBoostToast,
+      hideBoostIcon: hideBoostToast,
       cursorInside: false,
       isHoveringBar: () => hoveringBar,
     };
@@ -445,6 +665,7 @@
     function adjustSpeed(direction) {
       video.playbackRate = clampRate(video.playbackRate + config.delta * direction);
       updateLabel();
+      showRateToast(video.playbackRate);
     }
 
     decBtn.addEventListener("click", (e) => {
@@ -459,20 +680,18 @@
       adjustSpeed(1);
     });
 
-    /* Scroll wheel on the bar: scroll-up → faster, scroll-down → slower */
-    bar.addEventListener(
-      "wheel",
-      (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        adjustSpeed(e.deltaY < 0 ? 1 : -1);
-        showOverlay();
-      },
-      { passive: false }
-    );
-
-    /* Keep label in sync if something else changes the rate */
-    video.addEventListener("ratechange", updateLabel);
+    /* Keep label in sync if something else changes the rate — and,
+       while a left-click hold-boost is active on THIS video, re-assert
+       2x if anything else (our own release aside) tries to set a
+       different rate. See the hold-boost block above for why this is
+       the chosen way to "prevent other scripts from doing this too"
+       instead of fighting over the mousedown event itself. */
+    video.addEventListener("ratechange", () => {
+      if (holdBoostActive && holdBoostPair === pair && Math.abs(video.playbackRate - HOLD_BOOST_RATE) > 0.001) {
+        video.playbackRate = HOLD_BOOST_RATE;
+      }
+      updateLabel();
+    });
 
     /* Some sites (autoplay init, "unmute" buttons, feed videos loading
        in, etc.) set their own .volume after we've already applied
@@ -519,7 +738,7 @@
         mo.disconnect();
         resizeObserver.disconnect();
         clearTimeout(hideTimer);
-        clearTimeout(volumeHideTimer);
+        clearTimeout(toastHideTimer);
         const idx = videoOverlayPairs.indexOf(pair);
         if (idx >= 0) videoOverlayPairs.splice(idx, 1);
       }
