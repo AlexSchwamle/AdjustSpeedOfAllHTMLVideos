@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Video Speed Controller — Blocked Elements</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    background: #1a1a1e;
+    color: #e0e0e4;
+    padding: 32px 24px 60px;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: #ffffffee;
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+  }
+  h1 img { width: 22px; height: 22px; }
+  .subtitle {
+    font-size: 13px;
+    color: #999;
+    margin-bottom: 28px;
+    line-height: 1.5;
+  }
+  .subtitle code {
+    background: #27272b;
+    border: 1px solid #3a3a40;
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-family: "SF Mono", Consolas, Menlo, monospace;
+    font-size: 12px;
+    color: #cfcfe0;
+  }
+  .empty-state {
+    border: 1px dashed #3a3a40;
+    border-radius: 10px;
+    padding: 32px 24px;
+    text-align: center;
+    color: #888;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .entry {
+    background: #212126;
+    border: 1px solid #3a3a40;
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .entry-info {
+    flex: 1;
+    min-width: 0;
+  }
+  .entry-host {
+    font-size: 14px;
+    font-weight: 600;
+    color: #ffffffe0;
+    margin-bottom: 4px;
+  }
+  .entry-selector {
+    font-family: "SF Mono", Consolas, Menlo, monospace;
+    font-size: 11px;
+    color: #999;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .entry-meta {
+    font-size: 11px;
+    color: #666;
+    margin-top: 3px;
+  }
+  .remove-btn {
+    flex-shrink: 0;
+    background: #2c1f22;
+    border: 1px solid #5a2f36;
+    color: #ff8a8a;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 7px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .remove-btn:hover {
+    background: #3a2226;
+    border-color: #7a3a42;
+  }
+  .footer-row {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 20px;
+  }
+  .clear-all-btn {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 12px;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .clear-all-btn:hover {
+    color: #ff8a8a;
+  }
+  .saved-msg {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #27272b;
+    border: 1px solid #3a3a40;
+    color: #cfcfe0;
+    font-size: 12px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    opacity: 0;
+    transition: opacity 0.25s;
+    pointer-events: none;
+  }
+  .saved-msg.show { opacity: 1; }
+</style>
+</head>
+<body>
+  <h1><img src="icons/icon48.png" alt="">Video Speed Ctrl — Blocked Elements</h1>
+  <div class="subtitle">
+    Videos blocked here (right-click a video → <code>VSC: Block this element…</code>)
+    are never managed by the extension — no overlay, no scroll/hold gestures — on the
+    matching site. Remove an entry to let that element be picked up again next time
+    its page loads.
+  </div>
+
+  <div id="empty" class="empty-state" style="display:none;">
+    Nothing blocked yet. Right-click directly on a video and choose
+    <strong>"VSC: Block this element…"</strong> to exclude it.
+  </div>
+
+  <div id="list" class="list"></div>
+
+  <div class="footer-row">
+    <button id="clearAll" class="clear-all-btn" style="display:none;">Remove all entries</button>
+  </div>
+
+  <div class="saved-msg" id="saved">Updated</div>
+
+  <script src="options.js"></script>
+</body>
+</html>

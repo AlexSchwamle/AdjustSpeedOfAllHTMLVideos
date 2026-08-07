@@ -135,6 +135,10 @@
     });
   });
 
+  document.getElementById("openOptions").addEventListener("click", () => {
+    chrome.runtime.openOptionsPage();
+  });
+
   /* ── Util ─────────────────────────────────────────────────── */
   function debounce(fn, ms) {
     let t;

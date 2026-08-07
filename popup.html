@@ -123,6 +123,20 @@
     margin-top: 2px;
   }
   .saved-msg.show { opacity: 1; }
+  .options-link {
+    display: block;
+    text-align: center;
+    margin-top: 14px;
+    font-size: 11px;
+    color: #777;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+    background: none;
+    border: none;
+    width: 100%;
+  }
+  .options-link:hover { color: #aaa; }
 
   .hint {
     font-size: 10px;
@@ -195,6 +209,8 @@
   <div class="hint">Click a key field, then press the desired key.</div>
 
   <div class="saved-msg" id="saved">Settings saved</div>
+
+  <button class="options-link" id="openOptions" type="button">Manage blocked elements…</button>
 
   <script src="popup.js"></script>
 </body>

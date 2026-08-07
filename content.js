@@ -18,7 +18,7 @@
      fell back to whatever the last successful write happened to be.
      local has no such write-frequency cap, so this removes the
      problem instead of just working around it. */
-  const LOCAL_KEYS = { volume: "vsc_volume" };
+  const LOCAL_KEYS = { volume: "vsc_volume", blacklist: "vsc_blacklist" };
   const DEFAULTS = {
     delta: 0.05,
     defaultSpeed: 1.0,
@@ -34,6 +34,129 @@
   let config = { ...DEFAULTS };
   const managedVideos = new WeakSet();
   const videoOverlayPairs = []; // { video, bar, host, updateLabel, showOverlay, hideOverlay, ... }
+
+  /* ── Element blacklist ─────────────────────────────────────────
+     Some pages (Netflix/Disney+ hero banners are the classic case)
+     have a huge or offscreen autoplaying <video> that this extension
+     has no business managing — hijacking scroll over it to change its
+     volume instead of scrolling the page is actively harmful there.
+     Rather than guess at a size/position heuristic (which breaks down
+     immediately for fullscreen players, which SHOULD be managed),
+     right-clicking directly on a <video> element offers a native
+     "VSC: Block this element…" context menu entry (see background.js)
+     that permanently excludes that specific element going forward.
+     Entries are matched per-hostname against a structural selector
+     (tag names + nth-of-type, so it survives dynamic/hashed class
+     names) with the element's src as a secondary matcher when
+     available — neither is bulletproof against every possible page
+     structure, but between the two it holds up well in practice, and
+     the options page (right-click the extension icon → Options) lets
+     you review and remove entries if one ever mismatches. */
+  let blacklist = []; // [{ hostname, selector, src, addedAt }]
+
+  function loadBlacklist(cb) {
+    if (!chrome?.storage?.local) {
+      if (cb) cb();
+      return;
+    }
+    chrome.storage.local.get([LOCAL_KEYS.blacklist], (res) => {
+      if (chrome.runtime.lastError) console.warn("VSC blacklist load failed:", chrome.runtime.lastError.message);
+      blacklist = Array.isArray(res[LOCAL_KEYS.blacklist]) ? res[LOCAL_KEYS.blacklist] : [];
+      if (cb) cb();
+    });
+  }
+
+  /* Structural path from the element up to the nearest ancestor with an
+     id (a stable anchor, if one exists) or up to <body>. Deliberately
+     ignores class names — many sites hash or randomize those per build,
+     which would silently break every stored entry. */
+  function computeSelector(el) {
+    const parts = [];
+    let node = el;
+    while (node && node.nodeType === 1 && node !== document.body && node !== document.documentElement) {
+      let part = node.tagName.toLowerCase();
+      if (node.id) {
+        part += "#" + CSS.escape(node.id);
+        parts.unshift(part);
+        break;
+      }
+      const parent = node.parentElement;
+      if (parent) {
+        const siblings = Array.prototype.filter.call(parent.children, (c) => c.tagName === node.tagName);
+        if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+      }
+      parts.unshift(part);
+      node = node.parentElement;
+    }
+    return parts.join(" > ");
+  }
+
+  function isBlacklisted(video) {
+    if (blacklist.length === 0) return false;
+    const host = location.hostname;
+    const src = video.currentSrc || video.getAttribute("src") || "";
+    const sel = computeSelector(video);
+    return blacklist.some(
+      (entry) => entry.hostname === host && (entry.selector === sel || (src && entry.src && entry.src === src))
+    );
+  }
+
+  /* Brief red outline so the person can visually confirm which element
+     just got blocked — the browser's own context-menu click gives no
+     other feedback that anything happened. */
+  function flashBlockedHighlight(video) {
+    const rect = video.getBoundingClientRect();
+    const flash = document.createElement("div");
+    flash.style.cssText = [
+      "position:fixed",
+      `top:${rect.top}px`,
+      `left:${rect.left}px`,
+      `width:${rect.width}px`,
+      `height:${rect.height}px`,
+      "border:4px dashed #ff3b3b",
+      "background:rgba(255,59,59,0.15)",
+      "z-index:2147483647",
+      "pointer-events:none",
+      "box-sizing:border-box",
+    ].join(";");
+    document.body.appendChild(flash);
+    setTimeout(() => flash.remove(), 1500);
+  }
+
+  function blockElement(video) {
+    const entry = {
+      hostname: location.hostname,
+      selector: computeSelector(video),
+      src: video.currentSrc || video.getAttribute("src") || "",
+      addedAt: Date.now(),
+    };
+    blacklist.push(entry);
+    if (chrome?.storage?.local) {
+      chrome.storage.local.set({ [LOCAL_KEYS.blacklist]: blacklist }, () => {
+        if (chrome.runtime.lastError) console.warn("VSC blacklist save failed:", chrome.runtime.lastError.message);
+      });
+    }
+    flashBlockedHighlight(video);
+    const pair = videoOverlayPairs.find((p) => p.video === video);
+    if (pair) pair.destroy();
+  }
+
+  /* Set by the contextmenu listener down by the wheel handler: whichever
+     managed video's overlay is visible at right-click time. The
+     background script's context-menu click arrives later as a runtime
+     message, by which point the mouse may have moved, so this is
+     captured at the moment of the actual right-click instead of
+     re-derived from cursor position at click time. */
+  let lastRightClickedVideoEl = null;
+
+  if (chrome?.runtime?.onMessage) {
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (msg && msg.type === "vsc-block-element" && lastRightClickedVideoEl) {
+        blockElement(lastRightClickedVideoEl);
+        lastRightClickedVideoEl = null;
+      }
+    });
+  }
 
   /* ── Load config from storage ───────────────────────────────── */
   function loadConfig(cb) {
@@ -99,6 +222,18 @@
           videoOverlayPairs.forEach(({ video }) => {
             applyVolume(video, config.volume);
           });
+        }
+        if (changes[LOCAL_KEYS.blacklist]?.newValue != null) {
+          blacklist = Array.isArray(changes[LOCAL_KEYS.blacklist].newValue) ? changes[LOCAL_KEYS.blacklist].newValue : [];
+          /* Covers both directions live, no reload needed: an entry
+             added elsewhere (e.g. another tab's context-menu action, or
+             removed via the options page) should detach a video we're
+             currently managing; a removed entry should let a previously
+             -skipped video get picked up on the next scan. */
+          videoOverlayPairs.slice().forEach((pair) => {
+            if (isBlacklisted(pair.video)) pair.destroy();
+          });
+          scanVideos();
         }
       }
     });
@@ -419,10 +554,24 @@
      change speed, block it here — both the native browser menu via
      preventDefault, and any in-page custom menu (like YouTube's) via
      stopImmediatePropagation, since that stops the event before it
-     ever reaches the site's own contextmenu listener. */
+     ever reaches the site's own contextmenu listener. Also records
+     which video the "VSC: Block this element…" context menu item
+     (added by background.js) should target: whichever managed video
+     currently has its overlay visible (cursorInside), NOT e.target —
+     on most custom players the actual click target is one of many
+     control/UI divs layered on top of the <video> tag, so e.target is
+     essentially never the video itself. Falling back to e.target only
+     covers the rare case where the raw <video> really was what got
+     clicked (no overlay UI there at all). */
   window.addEventListener(
     "contextmenu",
     (e) => {
+      const hoveredPair = videoOverlayPairs.find((p) => p.cursorInside);
+      if (hoveredPair) {
+        lastRightClickedVideoEl = hoveredPair.video;
+      } else if (e.target && e.target.tagName === "VIDEO") {
+        lastRightClickedVideoEl = e.target;
+      }
       if (scrollUsedDuringHold) {
         e.preventDefault();
         e.stopPropagation();
@@ -454,6 +603,7 @@
   /* ── Build the overlay for a single <video> ─────────────────── */
   function attachOverlay(video) {
     if (managedVideos.has(video)) return;
+    if (isBlacklisted(video)) return;
     managedVideos.add(video);
 
     /* Apply default speed */
@@ -650,6 +800,7 @@
       hideBoostIcon: hideBoostToast,
       cursorInside: false,
       isHoveringBar: () => hoveringBar,
+      destroy: () => destroy(),
     };
     videoOverlayPairs.push(pair);
 
@@ -732,17 +883,20 @@
 
     /* Overlay starts hidden — only appears on mouse-in-bbox */
 
+    function destroy() {
+      host.remove();
+      mo.disconnect();
+      resizeObserver.disconnect();
+      clearTimeout(hideTimer);
+      clearTimeout(toastHideTimer);
+      const idx = videoOverlayPairs.indexOf(pair);
+      if (idx >= 0) videoOverlayPairs.splice(idx, 1);
+      managedVideos.delete(video);
+    }
+
     /* Cleanup if video removed from DOM */
     const mo = new MutationObserver(() => {
-      if (!document.contains(video)) {
-        host.remove();
-        mo.disconnect();
-        resizeObserver.disconnect();
-        clearTimeout(hideTimer);
-        clearTimeout(toastHideTimer);
-        const idx = videoOverlayPairs.indexOf(pair);
-        if (idx >= 0) videoOverlayPairs.splice(idx, 1);
-      }
+      if (!document.contains(video)) destroy();
     });
     mo.observe(document.body, { childList: true, subtree: true });
   }
@@ -798,8 +952,19 @@
   });
 
   /* ── Bootstrap ──────────────────────────────────────────────── */
-  loadConfig(() => {
+  let configReady = false;
+  let blacklistReady = false;
+  function tryBootstrap() {
+    if (!configReady || !blacklistReady) return;
     scanVideos();
     observer.observe(document.documentElement, { childList: true, subtree: true });
+  }
+  loadConfig(() => {
+    configReady = true;
+    tryBootstrap();
+  });
+  loadBlacklist(() => {
+    blacklistReady = true;
+    tryBootstrap();
   });
 })();
